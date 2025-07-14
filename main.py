@@ -2,6 +2,7 @@ import sqlite3
 import random
 import io
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
@@ -275,7 +276,7 @@ class PetPlugin(Star):
             logger.error(f"生成状态图时发生未知错误: {e}")
             return f"生成状态图时发生未知错误: {e}"
 
-    # --- 新增：属性克制计算 ---
+    # --- 属性克制计算 ---
     def _get_attribute_multiplier(self, attacker_attr: str, defender_attr: str) -> float:
         """根据攻击方和防御方的属性，计算伤害倍率。"""
         effectiveness = {
@@ -342,6 +343,35 @@ class PetPlugin(Star):
         winner_name = p1_name if p1_hp > 0 else p2_name
         log.append(f"\n战斗结束！胜利者是「{winner_name}」！")
         return log, winner_name
+
+    def _extract_json_from_text(self, text: str) -> str | None:
+        """
+        从包含额外文本的字符串中稳健地提取出第一个完整的JSON对象字符串。
+        优先匹配 ```json ... ``` 代码块。
+        """
+        # 优先策略：寻找markdown json代码块
+        match = re.search(r"```json\s*([\s\S]*?)\s*```", text)
+        if match:
+            return match.group(1).strip()
+
+        # 后备策略：寻找第一个 '{' 并进行括号匹配
+        try:
+            start_index = text.find('{')
+            if start_index == -1:
+                return None
+
+            brace_level = 0
+            for i, char in enumerate(text[start_index:]):
+                if char == '{':
+                    brace_level += 1
+                elif char == '}':
+                    brace_level -= 1
+
+                if brace_level == 0:
+                    return text[start_index: start_index + i + 1]
+            return None  # 括号不匹配
+        except Exception:
+            return None
 
     @filter.command("领养宠物")
     async def adopt_pet(self, event: AstrMessageEvent, pet_name: str | None = None):
@@ -422,21 +452,35 @@ class PetPlugin(Star):
             prompt = (
                 f"你是一个宠物游戏的世界事件生成器。请为一只名为'{pet['pet_name']}'的宠物在散步时，"
                 "生成一个简短、有趣的随机奇遇故事（50字以内）。"
-                "然后，必须以严格的JSON格式在故事后另起一行返回奖励，包含四个字段："
+                "然后，将奖励信息封装成一个JSON对象，并使用markdown的json代码块返回。JSON应包含四个字段："
                 "\"description\" (string, 故事描述), "
                 "\"reward_type\" (string, 从 'exp', 'mood', 'satiety' 中随机选择), "
-                "\"reward_value\" (integer, 奖励数值，exp范围5-15，其他10-20), "
-                "和 \"money_gain\" (integer, 获得的金钱，范围0-10)。\n\n"
-                "JSON示例:\n"
-                "{\"description\": \"{pet_name}在河边发现了一颗闪亮的石头，心情大好！\", "
-                "\"reward_type\": \"mood\", \"reward_value\": 15, \"money_gain\": 5}"
+                "\"reward_value\" (integer, 奖励数值), "
+                "和 \"money_gain\" (integer, 获得的金钱)。\n\n"
+                "示例回复格式：\n"
+                "这是一个奇妙的下午。\n"
+                "```json\n"
+                "{\n"
+                "    \"description\": \"{pet_name}在河边发现了一颗闪亮的石头，心情大好！\",\n"
+                "    \"reward_type\": \"mood\",\n"
+                "    \"reward_value\": 15,\n"
+                "    \"money_gain\": 5\n"
+                "}\n"
+                "```"
             )
 
+            completion_text = ""
             try:
                 llm_response = await self.context.get_using_provider().text_chat(prompt=prompt)
                 completion_text = llm_response.completion_text
-                json_part = completion_text[completion_text.find('{'):completion_text.rfind('}') + 1]
-                data = json.loads(json_part)
+
+                json_str = self._extract_json_from_text(completion_text)
+
+                if not json_str:
+                    logger.error(f"无法从LLM响应中提取JSON: {completion_text}")
+                    raise ValueError("未能解析LLM的响应格式")
+
+                data = json.loads(json_str)
 
                 desc = data['description'].format(pet_name=pet['pet_name'])
                 reward_type = data['reward_type']
@@ -461,11 +505,11 @@ class PetPlugin(Star):
 
                 if reward_type == 'exp':
                     final_reply.extend(self._check_level_up(user_id, group_id))
-            except Exception as e:
-                logger.error(f"LLM奇遇事件处理失败: {e}")
+
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                logger.error(f"LLM奇遇事件处理失败: {e}\n原始返回: {completion_text}")
                 final_reply.append("你的宠物在外面迷路了，好在最后成功找回，但什么也没发生。")
         else:
-            # --- PVE战斗事件 ---
             npc_level = max(1, pet['level'] + random.randint(-1, 1))
             npc_type_name = random.choice(list(PET_TYPES.keys()))
             npc_stats = PET_TYPES[npc_type_name]['initial_stats']
