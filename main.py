@@ -412,7 +412,7 @@ class PetPlugin(Star):
 
         now = datetime.now()
         last_walk = datetime.fromisoformat(pet['last_walk_time'])
-        if now - last_walk < timedelta(minutes=0):
+        if now - last_walk < timedelta(minutes=5):
             yield event.plain_result(f"刚散步回来，让「{pet['pet_name']}」休息一下吧。")
             return
 
