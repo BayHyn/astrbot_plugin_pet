@@ -57,7 +57,7 @@ STAT_MAP = {
 }
 
 @register(
-    "群宠物对决版",
+    "简易群宠物游戏",
     "DITF16",
     "一个简单的的群内宠物养成插件，支持LLM随机事件、PVP对决和图片状态卡。",
     "1.0",
@@ -539,7 +539,7 @@ class PetPlugin(Star):
 
         # [新增] 检查被挑战者的CD
         last_duel_target = datetime.fromisoformat(target_pet['last_duel_time'])
-        if now - last_duel_target < timedelta(hours=1):
+        if now - last_duel_target < timedelta(minutes=30):
             remaining = timedelta(hours=1) - (now - last_duel_target)
             yield event.plain_result(
                 f"对方的宠物正在休息，还需等待 {str(remaining).split('.')[0]} 才能接受对决。")
@@ -562,7 +562,7 @@ class PetPlugin(Star):
             f"\n对决结算：胜利者获得了 {winner_exp} 点经验值和 ${money_gain}，参与者获得了 {loser_exp} 点经验值。")
 
         with sqlite3.connect(self.db_path) as conn:
-            # [修改] 为双方都设置冷却时间
+            # 为双方都设置冷却时间
             conn.execute("UPDATE pets SET last_duel_time = ? WHERE user_id = ? AND group_id = ?",
                          (now.isoformat(), int(user_id), int(group_id)))
             conn.execute("UPDATE pets SET last_duel_time = ? WHERE user_id = ? AND group_id = ?",
