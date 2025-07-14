@@ -343,10 +343,9 @@ class PetPlugin(Star):
         log.append(f"\n战斗结束！胜利者是「{winner_name}」！")
         return log, winner_name
 
-    # --- 指令 Handlers ---
     @filter.command("领养宠物")
     async def adopt_pet(self, event: AstrMessageEvent, pet_name: str | None = None):
-        """领养一只随机的初始宠物。"""
+        """领养一只随机的初始宠物"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id:
             yield event.plain_result("该功能仅限群聊使用哦。")
@@ -360,11 +359,13 @@ class PetPlugin(Star):
         type_name = random.choice(initial_pet_types)
 
         if not pet_name:
-            pet_name = type_name  # 如果不提供名字，默认用类型名
+            pet_name = type_name
 
         pet_info = PET_TYPES[type_name]
         stats = pet_info['initial_stats']
-        now_iso = datetime.now().isoformat()
+        now = datetime.now()
+        cooldown_expired_time_iso = (now - timedelta(hours=2)).isoformat()
+        now_iso = now.isoformat()
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -372,7 +373,7 @@ class PetPlugin(Star):
                                      last_fed_time, last_walk_time, last_duel_time) 
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (int(user_id), int(group_id), pet_name, type_name, stats['attack'], stats['defense'],
-                 now_iso, now_iso, now_iso))
+                 now_iso, cooldown_expired_time_iso, cooldown_expired_time_iso))
             conn.commit()
 
         logger.info(f"新宠物领养: 群 {group_id} 用户 {user_id} 随机领养了 {type_name} - {pet_name}")
@@ -530,14 +531,14 @@ class PetPlugin(Star):
 
         now = datetime.now()
 
-        # [修改] 检查挑战者自己的CD
+        # 检查挑战者自己的CD
         last_duel_challenger = datetime.fromisoformat(challenger_pet['last_duel_time'])
         if now - last_duel_challenger < timedelta(minutes=30):
             remaining = timedelta(minutes=30) - (now - last_duel_challenger)
             yield event.plain_result(f"你的对决技能正在冷却中，还需等待 {str(remaining).split('.')[0]}。")
             return
 
-        # [新增] 检查被挑战者的CD
+        # 检查被挑战者的CD
         last_duel_target = datetime.fromisoformat(target_pet['last_duel_time'])
         if now - last_duel_target < timedelta(minutes=30):
             remaining = timedelta(hours=1) - (now - last_duel_target)
