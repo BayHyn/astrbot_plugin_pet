@@ -449,15 +449,14 @@ class PetPlugin(Star):
                     final_reply.append(f"意外之喜！你在路边捡到了 ${money_gain}！")
 
                 with sqlite3.connect(self.db_path) as conn:
-                    update_stat_query = f"UPDATE pets SET {reward_type} = ? , last_walk_time = ? WHERE user_id = ? AND group_id = ?"
-                    new_stat_value = pet[reward_type] + reward_value
-                    if reward_type != 'exp':
-                        new_stat_value = min(100, new_stat_value)
-                    conn.execute(update_stat_query, (new_stat_value, now.isoformat(), int(user_id), int(group_id)))
-
-                    if money_gain > 0:
-                        conn.execute("UPDATE pets SET money = money + ? WHERE user_id = ? AND group_id = ?",
-                                     (money_gain, int(user_id), int(group_id)))
+                    update_query = (
+                        f"UPDATE pets SET "
+                        f"{reward_type} = {'MIN(100, ' + reward_type + ' + ?)' if reward_type != 'exp' else (reward_type + ' + ?')}, "
+                        f"money = money + ?, "
+                        f"last_walk_time = ? "
+                        f"WHERE user_id = ? AND group_id = ?"
+                    )
+                    conn.execute(update_query, (reward_value, money_gain, now.isoformat(), int(user_id), int(group_id)))
                     conn.commit()
 
                 if reward_type == 'exp':
@@ -541,7 +540,7 @@ class PetPlugin(Star):
         # 检查被挑战者的CD
         last_duel_target = datetime.fromisoformat(target_pet['last_duel_time'])
         if now - last_duel_target < timedelta(minutes=30):
-            remaining = timedelta(hours=1) - (now - last_duel_target)
+            remaining = timedelta(minutes=30) - (now - last_duel_target)
             yield event.plain_result(
                 f"对方的宠物正在休息，还需等待 {str(remaining).split('.')[0]} 才能接受对决。")
             return
@@ -658,47 +657,46 @@ class PetPlugin(Star):
 
     @filter.command("购买")
     async def buy_item(self, event: AstrMessageEvent, item_name: str, quantity: int = 1):
-        """从商店购买物品。"""
+        """[修改] 从商店购买物品，使用原子性数据库操作防止竞态条件。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
 
         if item_name not in SHOP_ITEMS:
             yield event.plain_result(f"商店里没有「{item_name}」这种东西。")
             return
 
-        pet = self._get_pet(user_id, group_id)
-        if not pet:
+        if not self._get_pet(user_id, group_id):
             yield event.plain_result("你还没有宠物，无法购买物品。")
             return
 
         item_info = SHOP_ITEMS[item_name]
         total_cost = item_info['price'] * quantity
 
-        if pet.get('money', 0) < total_cost:
-            yield event.plain_result(
-                f"你的钱不够哦！购买 {quantity} 个「{item_name}」需要 ${total_cost}，你只有 ${pet.get('money', 0)}。")
-            return
-
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            # 扣钱
-            cursor.execute("UPDATE pets SET money = money - ? WHERE user_id = ? AND group_id = ?",
-                           (total_cost, int(user_id), int(group_id)))
-            # 增加物品到背包 (使用ON CONFLICT来处理已存在物品的更新)
+
+            cursor.execute(
+                "UPDATE pets SET money = money - ? WHERE user_id = ? AND group_id = ? AND money >= ?",
+                (total_cost, int(user_id), int(group_id), total_cost)
+            )
+
+            if cursor.rowcount == 0:
+                yield event.plain_result(f"你的钱不够哦！购买 {quantity} 个「{item_name}」需要 ${total_cost}。")
+                return
+
             cursor.execute("""
                     INSERT INTO inventory (user_id, group_id, item_name, quantity) 
                     VALUES (?, ?, ?, ?)
                     ON CONFLICT(user_id, group_id, item_name) 
                     DO UPDATE SET quantity = quantity + excluded.quantity
                 """, (int(user_id), int(group_id), item_name, quantity))
+
             conn.commit()
 
         yield event.plain_result(f"购买成功！你花费 ${total_cost} 购买了 {quantity} 个「{item_name}」。")
 
     @filter.command("投喂")
     async def feed_pet_item(self, event: AstrMessageEvent, item_name: str):
-        """
-        从背包中使用食物投喂你的宠物。
-        """
+        """[修改] 从背包中使用食物投喂宠物，使用原子性数据库操作防止竞态条件。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         pet = self._get_pet(user_id, group_id)
         if not pet:
@@ -711,41 +709,35 @@ class PetPlugin(Star):
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            # 检查背包中是否有该物品
-            cursor.execute("SELECT quantity FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ?",
-                           (int(user_id), int(group_id), item_name))
-            result = cursor.fetchone()
 
-            if not result or result[0] < 1:
+            cursor.execute(
+                "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ? AND quantity > 0",
+                (int(user_id), int(group_id), item_name)
+            )
+
+            if cursor.rowcount == 0:
                 yield event.plain_result(f"你的背包里没有「{item_name}」。")
                 return
 
-            # 使用物品
-            if result[0] == 1:
-                cursor.execute("DELETE FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ?",
-                               (int(user_id), int(group_id), item_name))
-            else:
-                cursor.execute(
-                    "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
-                    (int(user_id), int(group_id), item_name))
-
-            # 应用效果
             item_info = SHOP_ITEMS[item_name]
             satiety_gain = item_info.get('satiety', 0)
             mood_gain = item_info.get('mood', 0)
 
-            # 使用 self._get_pet 获取应用衰减后的最新值
-            current_pet_state = self._get_pet(user_id, group_id)
-            new_satiety = min(100, current_pet_state['satiety'] + satiety_gain)
-            new_mood = min(100, current_pet_state['mood'] + mood_gain)
+            cursor.execute(
+                "UPDATE pets SET satiety = MIN(100, satiety + ?), mood = MIN(100, mood + ?) WHERE user_id = ? AND group_id = ?",
+                (satiety_gain, mood_gain, int(user_id), int(group_id))
+            )
 
-            cursor.execute("UPDATE pets SET satiety = ?, mood = ? WHERE user_id = ? AND group_id = ?",
-                           (new_satiety, new_mood, int(user_id), int(group_id)))
+            cursor.execute(
+                "DELETE FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ? AND quantity <= 0",
+                (int(user_id), int(group_id), item_name))
+
             conn.commit()
 
         satiety_chinese = STAT_MAP.get('satiety', '饱食度')
         mood_chinese = STAT_MAP.get('mood', '心情值')
-        yield event.plain_result(f"你给「{pet['pet_name']}」投喂了「{item_name}」，它的{satiety_chinese}增加了 {satiety_gain}，{mood_chinese}增加了 {mood_gain}！")
+        yield event.plain_result(
+            f"你给「{pet['pet_name']}」投喂了「{item_name}」，它的{satiety_chinese}增加了 {satiety_gain}，{mood_chinese}增加了 {mood_gain}！")
 
     @filter.command("宠物菜单")
     async def pet_menu(self, event: AstrMessageEvent):
