@@ -61,7 +61,7 @@ STAT_MAP = {
     "简易群宠物游戏",
     "DITF16",
     "一个简单的的群内宠物养成插件，支持LLM随机事件、PVP对决和图片状态卡。",
-    "1.0",
+    "1.1",
     "https://github.com/DITF16/astrbot_plugin_pet"
 )
 class PetPlugin(Star):
@@ -285,9 +285,9 @@ class PetPlugin(Star):
             "草": "水"  # 草克水
         }
         if effectiveness.get(attacker_attr) == defender_attr:
-            return 1.5  # 克制，伤害加成50%
+            return 1.2  # 克制，伤害加成20%
         if effectiveness.get(defender_attr) == attacker_attr:
-            return 0.5  # 被克制，伤害减少50%
+            return 0.8  # 被克制，伤害减少20%
         return 1.0  # 无克制关系
 
     # --- 核心逻辑：对战系统 ---
