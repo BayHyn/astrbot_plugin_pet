@@ -1,0 +1,68 @@
+[
+  {
+    "type": "reward",
+    "weight": 20,
+    "description": "「{pet_name}」在草丛里发现了一个被丢弃的训练沙袋，蹭了蹭，获得了经验！",
+    "reward_type": "exp",
+    "reward_value": [
+      10,
+      20
+    ],
+    "money_gain": 0
+  },
+  {
+    "type": "reward",
+    "weight": 20,
+    "description": "「{pet_name}」追逐着一只蝴蝶，玩得不亦乐乎，心情大好！",
+    "reward_type": "mood",
+    "reward_value": 15,
+    "money_gain": 0
+  },
+  {
+    "type": "reward",
+    "weight": 15,
+    "description": "「{pet_name}」在树下发现了几颗野果，开心地吃掉了。",
+    "reward_type": "satiety",
+    "reward_value": [
+      10,
+      15
+    ],
+    "money_gain": 0
+  },
+  {
+    "type": "reward",
+    "weight": 10,
+    "description": "「{pet_name}」在地上发现了一个闪闪发光的东西，原来是几枚硬币！",
+    "reward_type": "none",
+    "reward_value": 0,
+    "money_gain": [
+      15,
+      30
+    ]
+  },
+  {
+    "type": "pve",
+    "weight": 15,
+    "description": "「{pet_name}」在散步时，突然从草丛里跳出了一只野生宠物！"
+  },
+  {
+    "type": "minigame",
+    "weight": 10,
+    "description": "「{pet_name}」遇到了一个神秘人，他伸出双手说：“猜猜看，奖励在哪只手里？”",
+    "win_chance": 0.5,
+    "win_text": "猜对了！神秘人留下了一些金钱和食物作为奖励。",
+    "lose_text": "猜错了...神秘人耸耸肩，消失在了雾中。",
+    "win_reward": {
+      "money": [
+        20,
+        40
+      ],
+      "mood": 10
+    }
+  },
+  {
+    "type": "nothing",
+    "weight": 10,
+    "description": "「{pet_name}」悠闲地散了一圈，什么特别的事情都没发生。"
+  }
+]

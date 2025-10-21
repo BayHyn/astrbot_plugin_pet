@@ -1,6 +1,5 @@
 import sqlite3
 import random
-import io
 import json
 import re
 from datetime import datetime, timedelta
@@ -12,7 +11,6 @@ from astrbot.core.message.components import At
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.core.star import StarTools
 from astrbot.api import logger
-import asyncio
 
 # --- 静态游戏数据定义 ---
 # 定义了所有可用的宠物类型及其基础属性、进化路径和图片资源
@@ -58,12 +56,70 @@ STAT_MAP = {
     "satiety": "饱食度"
 }
 
+# --- 散步事件的默认配置 ---
+DEFAULT_WALK_EVENTS = [
+    {
+        "type": "reward",
+        "weight": 20,
+        "description": "「{pet_name}」在草丛里发现了一个被丢弃的训练沙袋，蹭了蹭，获得了经验！",
+        "reward_type": "exp",
+        "reward_value": [10, 20],
+        "money_gain": 0
+    },
+    {
+        "type": "reward",
+        "weight": 20,
+        "description": "「{pet_name}」追逐着一只蝴蝶，玩得不亦乐乎，心情大好！",
+        "reward_type": "mood",
+        "reward_value": 15,
+        "money_gain": 0
+    },
+    {
+        "type": "reward",
+        "weight": 15,
+        "description": "「{pet_name}」在树下发现了几颗野果，开心地吃掉了。",
+        "reward_type": "satiety",
+        "reward_value": [10, 15],
+        "money_gain": 0
+    },
+    {
+        "type": "reward",
+        "weight": 10,
+        "description": "「{pet_name}」在地上发现了一个闪闪发光的东西，原来是几枚硬币！",
+        "reward_type": "none",
+        "reward_value": 0,
+        "money_gain": [15, 30]
+    },
+    {
+        "type": "pve",
+        "weight": 15,
+        "description": "「{pet_name}」在散步时，突然从草丛里跳出了一只野生宠物！"
+    },
+    {
+        "type": "minigame",
+        "weight": 10,
+        "description": "「{pet_name}」遇到了一个神秘人，他伸出双手说：“猜猜看，奖励在哪只手里？”",
+        "win_chance": 0.5,
+        "win_text": "猜对了！神秘人留下了一些金钱和食物作为奖励。",
+        "lose_text": "猜错了...神秘人耸耸肩，消失在了雾中。",
+        "win_reward": {
+            "money": [20, 40],
+            "mood": 10
+        }
+    },
+    {
+        "type": "nothing",
+        "weight": 10,
+        "description": "「{pet_name}」悠闲地散了一圈，什么特别的事情都没发生。"
+    }
+]
+
 
 @register(
     "简易群宠物游戏",
     "DITF16",
-    "一个简单的的群内宠物养成插件，支持LLM随机事件、PVP对决和图片状态卡。",
-    "1.2",
+    "一个简单的的群内宠物养成插件，支持随机事件、PVP对决和图片状态卡。",
+    "1.3",
     "https://github.com/DITF16/astrbot_plugin_pet"
 )
 class PetPlugin(Star):
@@ -75,9 +131,12 @@ class PetPlugin(Star):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir = Path(__file__).parent / "assets"
         self.db_path = self.data_dir / "pets.db"
+        self.events_path = self.data_dir / "walk_events.json"
+        self.walk_events = []
         self.pending_discards = {}
         self._init_database()
-        logger.info("群宠物对决版插件(v1.2)已加载。")
+        self._load_walk_events()
+        logger.info("群宠物对决版插件(v1.3-Config)已加载。")
 
     def _init_database(self):
         """初始化数据库，创建宠物表。"""
@@ -125,6 +184,58 @@ class PetPlugin(Star):
         except sqlite3.OperationalError as e:
             if f"duplicate column name: {column_name}" not in str(e):
                 raise
+
+    def _load_walk_events(self):
+        """加载散步事件配置文件。"""
+        if not self.events_path.exists():
+            try:
+                with open(self.events_path, 'w', encoding='utf-8') as f:
+                    json.dump(DEFAULT_WALK_EVENTS, f, ensure_ascii=False, indent=2)
+                logger.info(f"未找到事件配置文件，已自动创建: {self.events_path}")
+                self.walk_events = DEFAULT_WALK_EVENTS
+            except Exception as e:
+                logger.error(f"创建默认事件配置文件失败: {e}")
+                self.walk_events = DEFAULT_WALK_EVENTS
+        else:
+            try:
+                with open(self.events_path, 'r', encoding='utf-8') as f:
+                    self.walk_events = json.load(f)
+                logger.info(f"成功加载 {len(self.walk_events)} 个散步事件。")
+            except json.JSONDecodeError:
+                logger.error(f"事件配置文件 {self.events_path} 格式错误，将使用默认事件。")
+                self.walk_events = DEFAULT_WALK_EVENTS
+            except Exception as e:
+                logger.error(f"加载事件配置文件失败: {e}")
+                self.walk_events = DEFAULT_WALK_EVENTS
+
+    def _select_walk_event(self) -> dict:
+        """根据权重随机选择一个散步事件。"""
+        if not self.walk_events:
+            logger.warning("没有可用的散步事件，将返回一个 'nothing' 事件。")
+            return {"type": "nothing", "description": "「{pet_name}」散了一圈, 但什么也没发生。"}
+
+        total_weight = sum(event.get('weight', 0) for event in self.walk_events)
+        if total_weight == 0:
+            return random.choice(self.walk_events)
+
+        roll = random.uniform(0, total_weight)
+        current_weight = 0
+        for event in self.walk_events:
+            current_weight += event.get('weight', 0)
+            if roll < current_weight:
+                return event
+        return random.choice(self.walk_events) # 备用
+
+    def _parse_reward_value(self, value: int | list) -> int:
+        """解析奖励值，支持整数或[min, max]范围。"""
+        if isinstance(value, list) and len(value) == 2:
+            try:
+                return random.randint(int(value[0]), int(value[1]))
+            except ValueError:
+                return 0
+        elif isinstance(value, int):
+            return value
+        return 0
 
     def _get_pet(self, user_id: str, group_id: str) -> dict | None:
         """根据ID获取宠物信息，并自动处理离线期间的状态衰减。"""
@@ -402,7 +513,7 @@ class PetPlugin(Star):
 
     @filter.command("散步")
     async def walk_pet(self, event: AstrMessageEvent):
-        """带宠物散步，触发LLM生成的奇遇或PVE战斗"""
+        """带宠物散步，触发随机奇遇或PVE战斗"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
 
@@ -418,65 +529,32 @@ class PetPlugin(Star):
             return
 
         final_reply = []
-        if random.random() < 0.7:
-            prompt = (
-                f"你是一个宠物游戏的世界事件生成器。请为一只名为'{pet['pet_name']}'的宠物在散步时，"
-                "生成一个简短、有趣的随机奇遇故事（50字以内）。"
-                "然后，将奖励信息封装成一个JSON对象，并使用markdown的json代码块返回。JSON应包含四个字段："
-                "\"description\" (string, 故事描述), "
-                "\"reward_type\" (string, 从 'exp', 'mood', 'satiety' 中随机选择), "
-                "\"reward_value\" (integer, 奖励数值), "
-                "和 \"money_gain\" (integer, 获得的金钱)。\n\n"
-                "示例回复格式：\n"
-                "这是一个奇妙的下午。\n"
-                "```json\n"
-                "{\n"
-                "    \"description\": \"{pet_name}在河边发现了一颗闪亮的石头，心情大好！\",\n"
-                "    \"reward_type\": \"mood\",\n"
-                "    \"reward_value\": 15,\n"
-                "    \"money_gain\": 5\n"
-                "}\n"
-                "```"
-            )
+        exp_gain, money_gain, mood_gain, satiety_gain = 0, 0, 0, 0
 
-            completion_text = ""
-            try:
-                llm_response = await self.context.get_using_provider().text_chat(prompt=prompt)
-                completion_text = llm_response.completion_text
-                json_str = self._extract_json_from_text(completion_text)
+        event_data = self._select_walk_event()
+        event_type = event_data.get('type', 'nothing')
+        description = event_data.get('description', '...').format(pet_name=pet['pet_name'])
+        final_reply.append(description)
 
-                if not json_str:
-                    logger.error(f"无法从LLM响应中提取JSON: {completion_text}")
-                    raise ValueError("未能解析LLM的响应格式")
+        if event_type == 'reward':
+            reward_type = event_data.get('reward_type')
+            reward_value = self._parse_reward_value(event_data.get('reward_value', 0))
+            money_gain = self._parse_reward_value(event_data.get('money_gain', 0))
 
-                data = json.loads(json_str)
-                desc = data['description'].format(pet_name=pet['pet_name'])
-                reward_type = data['reward_type']
-                reward_value = int(data['reward_value'])
-                money_gain = int(data.get('money_gain', 0))
+            if reward_type == 'exp':
+                exp_gain = reward_value
+                final_reply.append(f"你的宠物获得了 {exp_gain} 点经验值！")
+            elif reward_type == 'mood':
+                mood_gain = reward_value
+                final_reply.append(f"你的宠物心情提升了 {mood_gain} 点！")
+            elif reward_type == 'satiety':
+                satiety_gain = reward_value
+                final_reply.append(f"你的宠物饱食度提升了 {satiety_gain} 点！")
 
-                reward_type_chinese = STAT_MAP.get(reward_type, reward_type)
-                final_reply.append(f"奇遇发生！\n{desc}\n你的宠物获得了 {reward_value} 点{reward_type_chinese}！")
-                if money_gain > 0:
-                    final_reply.append(f"意外之喜！你在路边捡到了 ${money_gain}！")
+            if money_gain > 0:
+                final_reply.append(f"意外之喜！你在路边捡到了 ${money_gain}！")
 
-                with sqlite3.connect(self.db_path) as conn:
-                    update_query = (
-                        f"UPDATE pets SET "
-                        f"{reward_type} = {'MIN(100, ' + reward_type + ' + ?)' if reward_type != 'exp' else (reward_type + ' + ?')}, "
-                        f"money = money + ?, "
-                        f"last_walk_time = ? "
-                        f"WHERE user_id = ? AND group_id = ?"
-                    )
-                    conn.execute(update_query, (reward_value, money_gain, now.isoformat(), int(user_id), int(group_id)))
-                    conn.commit()
-
-                if reward_type == 'exp':
-                    final_reply.extend(self._check_level_up(user_id, group_id))
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                logger.error(f"LLM奇遇事件处理失败: {e}\n原始返回: {completion_text}")
-                final_reply.append("你的宠物在外面迷路了，好在最后成功找回，但什么也没发生。")
-        else:
+        elif event_type == 'pve':
             npc_level = max(1, pet['level'] + random.randint(-1, 1))
             npc_type_name = random.choice(list(PET_TYPES.keys()))
             npc_stats = PET_TYPES[npc_type_name]['initial_stats']
@@ -489,8 +567,6 @@ class PetPlugin(Star):
             battle_log, winner_name = self._run_battle(pet, npc_pet)
             final_reply.extend(battle_log)
 
-            exp_gain = 0
-            money_gain = 0
             if winner_name == pet['pet_name']:
                 exp_gain = npc_level * 5 + random.randint(1, 5)
                 money_gain = random.randint(5, 15)
@@ -499,11 +575,40 @@ class PetPlugin(Star):
                 exp_gain = 1
                 final_reply.append(f"\n很遗憾，你的宠物战败了，但也获得了 {exp_gain} 点经验。")
 
+        elif event_type == 'minigame':
+            if random.random() < event_data.get('win_chance', 0.5):
+                # 胜利
+                win_reward = event_data.get('win_reward', {})
+                money_gain = self._parse_reward_value(win_reward.get('money', 0))
+                mood_gain = self._parse_reward_value(win_reward.get('mood', 0))
+                final_reply.append(event_data.get('win_text', '胜利了！'))
+            else:
+                # 失败
+                final_reply.append(event_data.get('lose_text', '失败了...'))
+
+        elif event_type == 'nothing':
+            pass # 描述已在开头添加
+
+        # --- 统一更新数据库 ---
+        try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
-                    "UPDATE pets SET exp = exp + ?, money = money + ?, last_walk_time = ? WHERE user_id = ? AND group_id = ?",
-                    (exp_gain, money_gain, now.isoformat(), int(user_id), int(group_id)))
+                    """UPDATE pets SET 
+                       exp = exp + ?, 
+                       money = money + ?, 
+                       mood = MIN(100, mood + ?), 
+                       satiety = MIN(100, satiety + ?), 
+                       last_walk_time = ? 
+                       WHERE user_id = ? AND group_id = ?""",
+                    (exp_gain, money_gain, mood_gain, satiety_gain, now.isoformat(), int(user_id), int(group_id))
+                )
                 conn.commit()
+        except Exception as e:
+            logger.error(f"散步事件更新数据库时出错: {e}")
+            final_reply.append("（系统错误：保存奖励失败，请联系管理员）")
+
+        # --- 检查升级 ---
+        if exp_gain > 0:
             final_reply.extend(self._check_level_up(user_id, group_id))
 
         yield event.plain_result("\n".join(final_reply))
@@ -653,27 +758,32 @@ class PetPlugin(Star):
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
 
+        if quantity <= 0:
+            yield event.plain_result("购买数量必须大于0。")
+            return
+
         if item_name not in SHOP_ITEMS:
             yield event.plain_result(f"商店里没有「{item_name}」这种东西。")
             return
 
-        if not self._get_pet(user_id, group_id):
+        pet = self._get_pet(user_id, group_id)
+        if not pet:
             yield event.plain_result("你还没有宠物，无法购买物品。")
             return
 
         item_info = SHOP_ITEMS[item_name]
         total_cost = item_info['price'] * quantity
 
+        if pet.get('money', 0) < total_cost:
+            yield event.plain_result(f"你的钱不够哦！购买 {quantity} 个「{item_name}」需要 ${total_cost}，你只有 ${pet.get('money', 0)}。")
+            return
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE pets SET money = money - ? WHERE user_id = ? AND group_id = ? AND money >= ?",
-                (total_cost, int(user_id), int(group_id), total_cost)
+                "UPDATE pets SET money = money - ? WHERE user_id = ? AND group_id = ?",
+                (total_cost, int(user_id), int(group_id))
             )
-
-            if cursor.rowcount == 0:
-                yield event.plain_result(f"你的钱不够哦！购买 {quantity} 个「{item_name}」需要 ${total_cost}。")
-                return
 
             cursor.execute("""
                     INSERT INTO inventory (user_id, group_id, item_name, quantity) 
@@ -703,13 +813,19 @@ class PetPlugin(Star):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ? AND quantity > 0",
+                "SELECT quantity FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ?",
                 (int(user_id), int(group_id), item_name)
             )
+            item_row = cursor.fetchone()
 
-            if cursor.rowcount == 0:
+            if not item_row or item_row[0] <= 0:
                 yield event.plain_result(f"你的背包里没有「{item_name}」。")
                 return
+
+            cursor.execute(
+                "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                (int(user_id), int(group_id), item_name)
+            )
 
             item_info = SHOP_ITEMS[item_name]
             satiety_gain = item_info.get('satiety', 0)
@@ -816,7 +932,7 @@ class PetPlugin(Star):
     @filter.command("宠物菜单")
     async def pet_menu(self, event: AstrMessageEvent):
         """显示所有可用的宠物插件命令。"""
-        menu_text = """--- 🐾 宠物插件帮助菜单 v1.2 🐾 ---
+        menu_text = """--- 🐾 宠物插件帮助菜单 v1.3 🐾 ---
 【核心功能】
 /领养宠物 [名字] - 领养一只新宠物。
 /我的宠物 - 查看宠物详细状态图。
@@ -825,7 +941,7 @@ class PetPlugin(Star):
 
 【日常互动】
 /宠物签到 - 每天领取金钱奖励。
-/散步 - 带宠物散步，可能触发奇遇或战斗。
+/散步 - 带宠物散步，触发随机奇遇或战斗。
 /投喂 [物品] - 从背包使用食物喂养宠物。
 
 【商店与物品】
@@ -850,4 +966,4 @@ class PetPlugin(Star):
 
     async def terminate(self):
         """插件卸载/停用时调用。"""
-        logger.info("群宠物对决版插件(v1.2)已卸载。")
+        logger.info("群宠物插件(astrbot_plugin_pet)已卸载。")
