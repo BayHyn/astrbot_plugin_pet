@@ -1,8 +1,6 @@
 import sqlite3
 import random
-import io
 import json
-import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
@@ -12,7 +10,6 @@ from astrbot.core.message.components import At
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.core.star import StarTools
 from astrbot.api import logger
-import asyncio
 from copy import deepcopy
 
 # --- 默认配置数据 (如果JSON文件不存在，将使用这些数据创建) ---
@@ -993,10 +990,22 @@ class PetPlugin(Star):
         yield event.plain_result(reply)
 
     @filter.command("学习技能")
-    async def learn_move(self, event: AstrMessageEvent, slot: int, move_name: str):
+    async def learn_move(self, event: AstrMessageEvent, slot_arg: str | None = None, move_name: str | None = None):
         """让宠物在指定栏位学习一个新技能。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
+
+        # --- 新增：参数检查与友好提示 ---
+        if slot_arg is None or move_name is None:
+            yield event.plain_result("指令格式不正确哦。\n用法: /学习技能 [栏位] [技能名]\n例如: /学习技能 1 撞击")
+            return
+
+        try:
+            slot = int(slot_arg)
+        except ValueError:
+            yield event.plain_result(f"技能栏位「{slot_arg}」必须是一个数字。\n用法: /学习技能 [栏位] [技能名]\n例如: /学习技能 1 撞击")
+            return
+        # --- 结束新增 ---
 
         pet = self._get_pet(user_id, group_id)
         if not pet:
@@ -1108,10 +1117,22 @@ class PetPlugin(Star):
         yield event.plain_result(reply)
 
     @filter.command("购买")
-    async def buy_item(self, event: AstrMessageEvent, item_name: str, quantity: int = 1):
+    async def buy_item(self, event: AstrMessageEvent, item_name: str | None = None, quantity_arg: str | None = "1"):
         """从商店购买物品。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
+
+        # --- 新增：参数检查与友好提示 ---
+        if item_name is None:
+            yield event.plain_result("指令格式不正确哦。\n用法: /购买 [物品名] [数量]\n例如: /购买 普通口粮 5")
+            return
+
+        try:
+            quantity = int(quantity_arg)
+        except (ValueError, TypeError):
+            yield event.plain_result(f"购买数量「{quantity_arg}」必须是一个数字。\n用法: /购买 [物品名] [数量]")
+            return
+        # --- 结束新增 ---
 
         if quantity <= 0:
             yield event.plain_result("购买数量必须大于0。")
@@ -1152,10 +1173,16 @@ class PetPlugin(Star):
 
     # --- v1.5 /投喂 -> /使用 ---
     @filter.command("使用")
-    async def use_item(self, event: AstrMessageEvent, item_name: str):
+    async def use_item(self, event: AstrMessageEvent, item_name: str | None = None):
         """从背包中使用物品（食物、药品等）。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
+
+        # --- 新增：参数检查与友好提示 ---
+        if item_name is None:
+            yield event.plain_result("指令格式不正确哦。\n用法: /使用 [物品名]\n例如: /使用 美味罐头")
+            return
+        # --- 结束新增 ---
 
         pet = self._get_pet(user_id, group_id)
         if not pet:
@@ -1241,10 +1268,16 @@ class PetPlugin(Star):
 
     # --- v1.5 新增：装备命令 ---
     @filter.command("装备")
-    async def equip_item(self, event: AstrMessageEvent, item_name: str):
+    async def equip_item(self, event: AstrMessageEvent, item_name: str | None = None):
         """从背包中装备一个持有物。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
+
+        # --- 新增：参数检查与友好提示 ---
+        if item_name is None:
+            yield event.plain_result("指令格式不正确哦。\n用法: /装备 [物品名]\n例如: /装备 力量头带")
+            return
+        # --- 结束新增 ---
 
         pet = self._get_pet(user_id, group_id)
         if not pet:
