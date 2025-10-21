@@ -1,5 +1,6 @@
 import sqlite3
 import random
+import io
 import json
 import re
 from datetime import datetime, timedelta
@@ -11,115 +12,138 @@ from astrbot.core.message.components import At
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.core.star import StarTools
 from astrbot.api import logger
+import asyncio
+from copy import deepcopy
 
-# --- 静态游戏数据定义 ---
-# 定义了所有可用的宠物类型及其基础属性、进化路径和图片资源
-PET_TYPES = {
+# --- 默认配置数据 (如果JSON文件不存在，将使用这些数据创建) ---
+
+# --- 默认 宠物数据 (v1.5 新增 "闪电") ---
+DEFAULT_PETS = {
     "水灵灵": {
         "attribute": "水",
         "description": "由纯净之水汇聚而成的元素精灵，性格温和，防御出众。",
-        "initial_stats": {"attack": 8, "defense": 12},
+        "base_stats": {"attack": 8, "defense": 12},
         "evolutions": {
-            1: {"name": "水灵灵", "image": "WaterSprite_1.png", "evolve_level": 30},
-            2: {"name": "源流之精", "image": "WaterSprite_2.png", "evolve_level": None}
+            "1": {"name": "水灵灵", "image": "WaterSprite_1.png", "evolve_level": 30},
+            "2": {"name": "源流之精", "image": "WaterSprite_2.png", "evolve_level": None}
+        },
+        "learnset": {
+            "1": ["撞击", "水枪"],
+            "5": ["抓挠"],
+            "10": ["水之波动"],
+            "30": ["水炮"]
         }
     },
     "火小犬": {
         "attribute": "火",
         "description": "体内燃烧着不灭之火的幼犬，活泼好动，攻击性强。",
-        "initial_stats": {"attack": 12, "defense": 8},
+        "base_stats": {"attack": 12, "defense": 8},
         "evolutions": {
-            1: {"name": "火小犬", "image": "FirePup_1.png", "evolve_level": 30},
-            2: {"name": "烈焰魔犬", "image": "FirePup_2.png", "evolve_level": None}
+            "1": {"name": "火小犬", "image": "FirePup_1.png", "evolve_level": 30},
+            "2": {"name": "烈焰魔犬", "image": "FirePup_2.png", "evolve_level": None}
+        },
+        "learnset": {
+            "1": ["撞击", "火花"],
+            "5": ["咬住"],
+            "10": ["火焰轮"],
+            "30": ["喷射火焰"]
         }
     },
     "草叶猫": {
         "attribute": "草",
         "description": "能进行光合作用的奇特猫咪，攻守均衡，喜欢打盹。",
-        "initial_stats": {"attack": 10, "defense": 10},
+        "base_stats": {"attack": 10, "defense": 10},
         "evolutions": {
-            1: {"name": "草叶猫", "image": "LeafyCat_1.png", "evolve_level": 30},
-            2: {"name": "丛林之王", "image": "LeafyCat_2.png", "evolve_level": None}
+            "1": {"name": "草叶猫", "image": "LeafyCat_1.png", "evolve_level": 30},
+            "2": {"name": "丛林之王", "image": "LeafyCat_2.png", "evolve_level": None}
+        },
+        "learnset": {
+            "1": ["撞击", "飞叶快刀"],
+            "5": ["抓挠"],
+            "10": ["魔法叶"],
+            "15": ["催眠粉"],
+            "30": ["日光束"]
+        }
+    },
+    "闪电": {
+        "attribute": "电",
+        "description": "一只行动迅速的宠物，浑身有着让人酥酥麻麻的电弧。",
+        "base_stats": {"attack": 11, "defense": 9},
+        "evolutions": {
+            "1": {"name": "闪电", "image": "Lightning.jpg", "evolve_level": None}
+        },
+        "learnset": {
+            "1": ["撞击", "电击"],
+            "8": ["电光一闪"],
+            "12": ["十万伏特"]
         }
     }
 }
-# --- 静态游戏数据定义 (商店) ---
+
+# --- 默认 技能数据 (v1.5 新增 "effect" 字段) ---
+DEFAULT_MOVES = {
+    "撞击": {"attribute": "普通", "power": 40, "description": "用身体猛撞对手。"},
+    "抓挠": {"attribute": "普通", "power": 40, "description": "用利爪抓伤对手。"},
+    "咬住": {"attribute": "普通", "power": 50, "description": "用牙齿撕咬对手。"},
+    "电光一闪": {"attribute": "普通", "power": 50, "description": "高速冲向对手。"},
+    "水枪": {"attribute": "水", "power": 40, "description": "向对手喷射水流。"},
+    "水之波动": {"attribute": "水", "power": 60, "description": "释放水之波动攻击。"},
+    "水炮": {"attribute": "水", "power": 110, "description": "威力巨大的水柱。"},
+    "火花": {"attribute": "火", "power": 40, "description": "小小的火苗。"},
+    "火焰轮": {"attribute": "火", "power": 60, "description": "缠绕火焰的冲撞。"},
+    "喷射火焰": {"attribute": "火", "power": 90, "description": "猛烈的火焰攻击。"},
+    "飞叶快刀": {"attribute": "草", "power": 40, "description": "飞出叶片切割对手。"},
+    "魔法叶": {"attribute": "草", "power": 60, "description": "必定命中的神奇叶片。"},
+    "日光束": {"attribute": "草", "power": 120, "description": "汇聚日光，释放光束。"},
+    "催眠粉": {"attribute": "草", "power": 0, "description": "撒出催眠的粉末。", "effect": {"type": "SLEEP", "chance": 0.75}},
+    "电击": {"attribute": "电", "power": 40, "description": "微弱的电击。", "effect": {"type": "PARALYSIS", "chance": 0.1}},
+    "十万伏特": {"attribute": "电", "power": 90, "description": "强力的电击。", "effect": {"type": "PARALYSIS", "chance": 0.1}},
+    "剧毒": {"attribute": "毒", "power": 0, "description": "让对手中剧毒。", "effect": {"type": "POISON", "chance": 1.0}}
+}
+
+# --- 默认 散步事件 ---
+DEFAULT_WALK_EVENTS = [
+    {"type": "reward", "weight": 20, "description": "「{pet_name}」在草丛里发现了一个被丢弃的训练沙袋，蹭了蹭，获得了经验！", "reward_type": "exp", "reward_value": [10, 20], "money_gain": 0},
+    {"type": "reward", "weight": 20, "description": "「{pet_name}」追逐着一只蝴蝶，玩得不亦乐乎，心情大好！", "reward_type": "mood", "reward_value": 15, "money_gain": 0},
+    {"type": "reward", "weight": 15, "description": "「{pet_name}」在树下发现了几颗野果，开心地吃掉了。", "reward_type": "satiety", "reward_value": [10, 15], "money_gain": 0},
+    {"type": "reward", "weight": 10, "description": "「{pet_name}」在地上发现了一个闪闪发光的东西，原来是几枚硬币！", "reward_type": "none", "reward_value": 0, "money_gain": [15, 30]},
+    {"type": "pve", "weight": 15, "description": "「{pet_name}」在散步时，突然从草丛里跳出了一只野生宠物！"},
+    {"type": "minigame", "weight": 10, "description": "「{pet_name}」遇到了一个神秘人，他伸出双手说：“猜猜看，奖励在哪只手里？”", "win_chance": 0.5, "win_text": "猜对了！神秘人留下了一些金钱和食物作为奖励。", "lose_text": "猜错了...神秘人耸耸肩，消失在了雾中。", "win_reward": {"money": [20, 40], "mood": 10}},
+    {"type": "nothing", "weight": 10, "description": "「{pet_name}」悠闲地散了一圈，什么特别的事情都没发生。"}
+]
+
+# --- 静态游戏数据定义 (商店) (v1.5 更新) ---
 SHOP_ITEMS = {
+    # 食物
     "普通口粮": {"price": 10, "type": "food", "satiety": 20, "mood": 5, "description": "能快速填饱肚子的基础食物。"},
     "美味罐头": {"price": 30, "type": "food", "satiety": 50, "mood": 15, "description": "营养均衡，宠物非常爱吃。"},
     "心情饼干": {"price": 25, "type": "food", "satiety": 10, "mood": 30, "description": "能让宠物心情愉悦的神奇零食。"},
+    # 药品
+    "解毒药": {"price": 40, "type": "status_heal", "cures": "POISON", "description": "治愈「中毒」状态。"},
+    "苏醒药": {"price": 40, "type": "status_heal", "cures": "SLEEP", "description": "治愈「睡眠」状态。"},
+    "麻痹药": {"price": 40, "type": "status_heal", "cures": "PARALYSIS", "description": "治愈「麻痹」状态。"},
+    # 持有物
+    "力量头带": {"price": 200, "type": "held_item", "description": "【持有】战斗时，攻击力小幅提升。"},
+    "坚硬外壳": {"price": 200, "type": "held_item", "description": "【持有】战斗时，防御力小幅提升。"},
+    # 技能光盘
+    "技能光盘-剧毒": {"price": 500, "type": "tm", "move_name": "剧毒", "description": "一次性光盘，让宠物学会「剧毒」。"}
 }
-# --- 静态游戏数据定义 (状态中文名映射) ---
+# --- 静态游戏数据定义 (状态中文名映射) (v1.5 更新) ---
 STAT_MAP = {
     "exp": "经验值",
     "mood": "心情值",
-    "satiety": "饱食度"
+    "satiety": "饱食度",
+    "POISON": "中毒",
+    "SLEEP": "睡眠",
+    "PARALYSIS": "麻痹"
 }
-
-# --- 散步事件的默认配置 ---
-DEFAULT_WALK_EVENTS = [
-    {
-        "type": "reward",
-        "weight": 20,
-        "description": "「{pet_name}」在草丛里发现了一个被丢弃的训练沙袋，蹭了蹭，获得了经验！",
-        "reward_type": "exp",
-        "reward_value": [10, 20],
-        "money_gain": 0
-    },
-    {
-        "type": "reward",
-        "weight": 20,
-        "description": "「{pet_name}」追逐着一只蝴蝶，玩得不亦乐乎，心情大好！",
-        "reward_type": "mood",
-        "reward_value": 15,
-        "money_gain": 0
-    },
-    {
-        "type": "reward",
-        "weight": 15,
-        "description": "「{pet_name}」在树下发现了几颗野果，开心地吃掉了。",
-        "reward_type": "satiety",
-        "reward_value": [10, 15],
-        "money_gain": 0
-    },
-    {
-        "type": "reward",
-        "weight": 10,
-        "description": "「{pet_name}」在地上发现了一个闪闪发光的东西，原来是几枚硬币！",
-        "reward_type": "none",
-        "reward_value": 0,
-        "money_gain": [15, 30]
-    },
-    {
-        "type": "pve",
-        "weight": 15,
-        "description": "「{pet_name}」在散步时，突然从草丛里跳出了一只野生宠物！"
-    },
-    {
-        "type": "minigame",
-        "weight": 10,
-        "description": "「{pet_name}」遇到了一个神秘人，他伸出双手说：“猜猜看，奖励在哪只手里？”",
-        "win_chance": 0.5,
-        "win_text": "猜对了！神秘人留下了一些金钱和食物作为奖励。",
-        "lose_text": "猜错了...神秘人耸耸肩，消失在了雾中。",
-        "win_reward": {
-            "money": [20, 40],
-            "mood": 10
-        }
-    },
-    {
-        "type": "nothing",
-        "weight": 10,
-        "description": "「{pet_name}」悠闲地散了一圈，什么特别的事情都没发生。"
-    }
-]
 
 
 @register(
     "简易群宠物游戏",
     "DITF16",
-    "一个简单的的群内宠物养成插件，支持随机事件、PVP对决和图片状态卡。",
-    "1.3",
+    "一个简单的的群内宠物养成插件",
+    "1.5",
     "https://github.com/DITF16/astrbot_plugin_pet"
 )
 class PetPlugin(Star):
@@ -131,15 +155,23 @@ class PetPlugin(Star):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.assets_dir = Path(__file__).parent / "assets"
         self.db_path = self.data_dir / "pets.db"
+
+        # --- JSON 配置文件路径 ---
         self.events_path = self.data_dir / "walk_events.json"
-        self.walk_events = []
+        self.pets_path = self.data_dir / "pets.json"
+        self.moves_path = self.data_dir / "moves.json"
+
+        # --- 加载配置 ---
+        self.walk_events = self._load_config(self.events_path, DEFAULT_WALK_EVENTS)
+        self.pets_data = self._load_config(self.pets_path, DEFAULT_PETS)
+        self.moves_data = self._load_config(self.moves_path, DEFAULT_MOVES)
+
         self.pending_discards = {}
         self._init_database()
-        self._load_walk_events()
-        logger.info("群宠物对决版插件(v1.3-Config)已加载。")
+        logger.info("简易群宠物游戏插件(astrbot_plugin_pet)已加载。")
 
     def _init_database(self):
-        """初始化数据库，创建宠物表。"""
+        """初始化数据库，创建宠物表和物品表。"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -158,13 +190,21 @@ class PetPlugin(Star):
                     last_fed_time TEXT,
                     last_walk_time TEXT,
                     last_duel_time TEXT,
+                    money INTEGER DEFAULT 50,
+                    last_updated_time TEXT,
+                    last_signin_time TEXT,
                     PRIMARY KEY (user_id, group_id)
                 )
             """)
 
-            self._add_column(cursor, 'pets', 'money', 'INTEGER DEFAULT 50')
-            self._add_column(cursor, 'pets', 'last_updated_time', 'TEXT')
-            self._add_column(cursor, 'pets', 'last_signin_time', 'TEXT')
+            # --- 为 v1.4 添加新列 ---
+            self._add_column(cursor, 'pets', 'move1', 'TEXT')
+            self._add_column(cursor, 'pets', 'move2', 'TEXT')
+            self._add_column(cursor, 'pets', 'move3', 'TEXT')
+            self._add_column(cursor, 'pets', 'move4', 'TEXT')
+            # --- 为 v1.5 添加新列 ---
+            self._add_column(cursor, 'pets', 'held_item', 'TEXT')
+            self._add_column(cursor, 'pets', 'status_condition', 'TEXT')
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS inventory (
@@ -183,30 +223,33 @@ class PetPlugin(Star):
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
         except sqlite3.OperationalError as e:
             if f"duplicate column name: {column_name}" not in str(e):
+                logger.warning(f"尝试添加已存在的列: {column_name} (已忽略)")
+            else:
                 raise
 
-    def _load_walk_events(self):
-        """加载散步事件配置文件。"""
-        if not self.events_path.exists():
+    def _load_config(self, config_path: Path, default_data: dict | list) -> dict | list:
+        """加载指定的JSON配置文件，如果不存在则创建。"""
+        if not config_path.exists():
             try:
-                with open(self.events_path, 'w', encoding='utf-8') as f:
-                    json.dump(DEFAULT_WALK_EVENTS, f, ensure_ascii=False, indent=2)
-                logger.info(f"未找到事件配置文件，已自动创建: {self.events_path}")
-                self.walk_events = DEFAULT_WALK_EVENTS
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(default_data, f, ensure_ascii=False, indent=2)
+                logger.info(f"未找到配置文件，已自动创建: {config_path}")
+                return default_data
             except Exception as e:
-                logger.error(f"创建默认事件配置文件失败: {e}")
-                self.walk_events = DEFAULT_WALK_EVENTS
+                logger.error(f"创建默认配置文件失败 {config_path}: {e}")
+                return default_data
         else:
             try:
-                with open(self.events_path, 'r', encoding='utf-8') as f:
-                    self.walk_events = json.load(f)
-                logger.info(f"成功加载 {len(self.walk_events)} 个散步事件。")
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                logger.info(f"成功加载配置文件: {config_path}")
+                return data
             except json.JSONDecodeError:
-                logger.error(f"事件配置文件 {self.events_path} 格式错误，将使用默认事件。")
-                self.walk_events = DEFAULT_WALK_EVENTS
+                logger.error(f"配置文件 {config_path} 格式错误，将使用默认数据。")
+                return default_data
             except Exception as e:
-                logger.error(f"加载事件配置文件失败: {e}")
-                self.walk_events = DEFAULT_WALK_EVENTS
+                logger.error(f"加载配置文件失败 {config_path}: {e}")
+                return default_data
 
     def _select_walk_event(self) -> dict:
         """根据权重随机选择一个散步事件。"""
@@ -282,10 +325,17 @@ class PetPlugin(Star):
         return int(10 * (level ** 1.5))
 
     def _check_level_up(self, user_id: str, group_id: str) -> list[str]:
-        """检查并处理宠物升级，返回一个包含升级消息的列表。"""
+        """检查并处理宠物升级，返回一个包含升级和技能学习消息的列表。"""
         level_up_messages = []
+        pet = self._get_pet(user_id, group_id)
+        if not pet: return []
+
+        pet_type_config = self.pets_data.get(pet['pet_type'])
+        if not pet_type_config: return []
+        learnset = pet_type_config.get('learnset', {})
+
         while True:
-            pet = self._get_pet(user_id, group_id)
+            pet = self._get_pet(user_id, group_id) # 重新获取最新数据
             if not pet: break
 
             exp_needed = self._exp_for_next_level(pet['level'])
@@ -304,12 +354,20 @@ class PetPlugin(Star):
 
                 logger.info(f"宠物升级: {pet['pet_name']} 升到了 {new_level} 级！")
                 level_up_messages.append(f"🎉 恭喜！你的宠物「{pet['pet_name']}」升级到了 Lv.{new_level}！")
+
+                # 检查技能学习
+                moves_learned = learnset.get(str(new_level))
+                if moves_learned:
+                    for move in moves_learned:
+                        level_up_messages.append(f"💡 你的宠物「{pet['pet_name']}」似乎可以学习新技能「{move}」了！")
+                    level_up_messages.append("请使用 `/宠物技能` 查看详情，并使用 `/学习技能` 来管理技能。")
+
             else:
                 break
         return level_up_messages
 
     def _generate_pet_status_image(self, pet_data: dict, sender_name: str) -> Path | str:
-        """根据宠物数据生成一张状态图。"""
+        """根据宠物数据生成一张状态图（已更新为显示状态和持有物）。"""
         try:
             W, H = 800, 600
             bg_path = self.assets_dir / "background.png"
@@ -318,9 +376,12 @@ class PetPlugin(Star):
             draw = ImageDraw.Draw(img)
             font_title = ImageFont.truetype(str(font_path), 40)
             font_text = ImageFont.truetype(str(font_path), 28)
+            font_text_small = ImageFont.truetype(str(font_path), 24)
 
-            pet_type_info = PET_TYPES[pet_data['pet_type']]
-            evo_info = pet_type_info['evolutions'][pet_data['evolution_stage']]
+            pet_type_info = self.pets_data.get(pet_data['pet_type'])
+            if not pet_type_info: return "错误：找不到该宠物的配置数据。"
+
+            evo_info = pet_type_info['evolutions'][str(pet_data['evolution_stage'])]
             pet_img_path = self.assets_dir / evo_info['image']
             pet_img = Image.open(pet_img_path).convert("RGBA").resize((300, 300))
             img.paste(pet_img, (50, 150), pet_img)
@@ -330,17 +391,37 @@ class PetPlugin(Star):
             draw.text((400, 200), f"种族: {evo_info['name']} ({pet_data['pet_type']})", font=font_text, fill="white")
             draw.text((400, 250), f"等级: Lv.{pet_data['level']}", font=font_text, fill="white")
 
+            # --- v1.5 新增：显示状态 ---
+            status = pet_data.get('status_condition')
+            if status:
+                status_name = STAT_MAP.get(status, "未知")
+                draw.text((600, 250), f"状态:【{status_name}】", font=font_text, fill="#FF6666") # 红色高亮
+
             exp_needed = self._exp_for_next_level(pet_data['level'])
-            exp_ratio = min(1.0, pet_data['exp'] / exp_needed)
+            exp_ratio = min(1.0, pet_data['exp'] / exp_needed) if exp_needed > 0 else 1.0
             draw.text((400, 300), f"经验: {pet_data['exp']} / {exp_needed}", font=font_text, fill="white")
             draw.rectangle([400, 340, 750, 360], outline="white", fill="gray")
             draw.rectangle([400, 340, 400 + 350 * exp_ratio, 360], fill="#66ccff")
 
-            draw.text((400, 390), f"攻击: {pet_data['attack']}", font=font_text, fill="white")
-            draw.text((600, 390), f"防御: {pet_data['defense']}", font=font_text, fill="white")
-            draw.text((400, 440), f"心情: {pet_data['mood']}/100", font=font_text, fill="white")
-            draw.text((600, 440), f"饱食度: {pet_data['satiety']}/100", font=font_text, fill="white")
-            draw.text((400, 490), f"金钱: ${pet_data.get('money', 0)}", font=font_text, fill="#FFD700")
+            draw.text((400, 380), f"攻击: {pet_data['attack']}", font=font_text, fill="white")
+            draw.text((600, 380), f"防御: {pet_data['defense']}", font=font_text, fill="white")
+            draw.text((400, 420), f"心情: {pet_data['mood']}/100", font=font_text, fill="white")
+            draw.text((600, 420), f"饱食度: {pet_data['satiety']}/100", font=font_text, fill="white")
+
+            # --- v1.5 新增：显示持有物 ---
+            held_item = pet_data.get('held_item')
+            held_item_name = f"持有: {held_item}" if held_item else "持有: [无]"
+            draw.text((400, 460), held_item_name, font=font_text, fill="#FFFF99") # 黄色
+            draw.text((400, 500), f"金钱: ${pet_data.get('money', 0)}", font=font_text, fill="#FFD700")
+
+            # --- 显示技能 ---
+            draw.text((50, 460), "--- 技能 ---", font=font_text, fill="white")
+            moves = [pet_data.get('move1'), pet_data.get('move2'), pet_data.get('move3'), pet_data.get('move4')]
+            y_offset = 500
+            for i, move in enumerate(moves):
+                move_name = move if move else "[ -- ]"
+                move_attr = self.moves_data.get(move, {}).get('attribute', '普通')
+                draw.text((50, y_offset + i*25), f"[{i+1}] {move_name} ({move_attr})", font=font_text_small, fill="white")
 
             output_path = self.cache_dir / f"status_{pet_data['group_id']}_{pet_data['user_id']}.png"
             img.save(output_path, format='PNG')
@@ -352,100 +433,211 @@ class PetPlugin(Star):
             logger.error(f"生成状态图时发生未知错误: {e}")
             return f"生成状态图时发生未知错误: {e}"
 
-    def _get_attribute_multiplier(self, attacker_attr: str, defender_attr: str) -> float:
-        """计算属性克制伤害倍率。"""
-        effectiveness = {"水": "火", "火": "草", "草": "水"}
-        if effectiveness.get(attacker_attr) == defender_attr: return 1.2
-        if effectiveness.get(defender_attr) == attacker_attr: return 0.8
-        return 1.0
+    def _get_attribute_multiplier(self, move_attr: str, defender_attr: str) -> float:
+        """计算属性克制伤害倍率 (v1.5 新增 电/毒)。"""
+        # A克B: A -> B
+        effectiveness = {
+            "水": ["火"],
+            "火": ["草"],
+            "草": ["水", "电"], # 假设草克电 (地面)
+            "电": ["水"],
+            "毒": ["草"]
+        }
+        # B克A: B -> A
+        resistance = {
+            "水": ["火", "水"],
+            "火": ["火", "草"],
+            "草": ["草", "水", "电"],
+            "电": ["电"],
+            "毒": ["毒"]
+        }
 
-    def _run_battle(self, pet1: dict, pet2: dict) -> tuple[list[str], str]:
-        """执行两个宠物之间的对战，集成状态、暴击和等级压制逻辑。"""
+        if defender_attr in effectiveness.get(move_attr, []):
+            return 1.2 # 效果拔群
+        if move_attr in resistance.get(defender_attr, []):
+             return 0.8 # 效果不佳
+
+        return 1.0 # 普通
+
+    # --- 战斗核心 (v1.5 重构) ---
+    def _run_battle(self, pet1_orig: dict, pet2_orig: dict) -> tuple[list[str], str]:
+        """执行两个宠物之间的对战（v1.5 重构，支持状态和持有物）。"""
         log = []
+
+        # 深拷贝，防止战斗中的状态修改影响到原始数据
+        pet1 = deepcopy(pet1_orig)
+        pet2 = deepcopy(pet2_orig)
+
         p1_hp = pet1['level'] * 10 + 50
         p2_hp = pet2['level'] * 10 + 50
         p1_name, p2_name = pet1['pet_name'], pet2['pet_name']
-        p1_attr = PET_TYPES[pet1['pet_type']]['attribute']
-        p2_attr = PET_TYPES[pet2['pet_type']]['attribute']
+
+        p1_pet_attr = self.pets_data[pet1['pet_type']]['attribute']
+        p2_pet_attr = self.pets_data[pet2['pet_type']]['attribute']
+
+        p1_moves = [m for m in [pet1.get('move1'), pet1.get('move2'), pet1.get('move3'), pet1.get('move4')] if m]
+        p2_moves = [m for m in [pet2.get('move1'), pet2.get('move2'), pet2.get('move3'), pet2.get('move4')] if m]
 
         log.append(
-            f"战斗开始！\n「{p1_name}」(Lv.{pet1['level']} {p1_attr}系) vs 「{p2_name}」(Lv.{pet2['level']} {p2_attr}系)")
+            f"战斗开始！\n「{p1_name}」(Lv.{pet1['level']} {p1_pet_attr}系) vs 「{p2_name}」(Lv.{pet2['level']} {p2_pet_attr}系)")
 
-        def calculate_turn(attacker, defender, defender_hp, turn_log):
-            satiety_mod = 0.5 + (attacker['satiety'] / 100) * 0.7
-            if attacker['satiety'] < 20:
-                turn_log.append(f"「{attacker['pet_name']}」饿得有气无力...")
+        if pet1.get('held_item'): log.append(f"「{p1_name}」携带着「{pet1['held_item']}」。")
+        if pet2.get('held_item'): log.append(f"「{p2_name}」携带着「{pet2['held_item']}」。")
 
-            eff_attack = attacker['attack'] * satiety_mod
-            eff_defense = defender['defense'] * (0.5 + (defender['satiety'] / 100) * 0.7)
 
-            crit_chance = 0.05 + (attacker['mood'] / 100) * 0.20
-            is_crit = random.random() < crit_chance
-            crit_multiplier = 1.3 + (attacker['mood'] / 100) * 0.4
+        def calculate_turn(attacker, defender, defender_hp, attacker_moves, defender_pet_attr, turn_log):
+            """计算一个回合的完整逻辑。"""
 
-            attr_multiplier = self._get_attribute_multiplier(
-                PET_TYPES[attacker['pet_type']]['attribute'],
-                PET_TYPES[defender['pet_type']]['attribute']
-            )
-            level_diff_mod = 1 + (attacker['level'] - defender['level']) * 0.02
-            base_dmg = max(1, eff_attack * random.uniform(0.9, 1.1) - eff_defense * 0.6)
+            attacker_status = attacker.get('status_condition')
+            new_defender_status = defender.get('status_condition')
 
-            final_dmg = int(base_dmg * attr_multiplier * level_diff_mod)
-            if is_crit:
-                final_dmg = int(final_dmg * crit_multiplier)
+            # --- 1. 回合开始：检查状态 ---
+            if attacker_status == 'SLEEP':
+                if random.random() < 0.5: # 50% 几率醒来
+                    attacker['status_condition'] = None
+                    turn_log.append(f"「{attacker['pet_name']}」醒过来了！")
+                else:
+                    turn_log.append(f"「{attacker['pet_name']}」正在熟睡...")
+                    return defender_hp, new_defender_status, turn_log
 
-            new_defender_hp = defender_hp - final_dmg
+            if attacker_status == 'PARALYSIS':
+                if random.random() < 0.25: # 25% 几率无法动弹
+                    turn_log.append(f"「{attacker['pet_name']}」麻痹了，无法动弹！")
+                    return defender_hp, new_defender_status, turn_log
 
-            turn_log.append(f"「{attacker['pet_name']}」发起了攻击！")
-            if is_crit: turn_log.append("💥 会心一击！")
-            if attr_multiplier > 1.0:
-                turn_log.append("效果拔群！")
-            elif attr_multiplier < 1.0:
-                turn_log.append("效果不太理想…")
-            turn_log.append(f"对「{defender['pet_name']}」造成了 {final_dmg} 点伤害！(剩余HP: {max(0, new_defender_hp)})")
+            # --- 2. 选择技能 ---
+            if not attacker_moves:
+                chosen_move_name = "挣扎"
+                move_data = {"attribute": "普通", "power": 35, "description": "拼命地挣扎。"}
+            else:
+                chosen_move_name = random.choice(attacker_moves)
+                move_data = self.moves_data.get(chosen_move_name)
+                if not move_data:
+                    chosen_move_name = "挣扎"
+                    move_data = {"attribute": "普通", "power": 35, "description": "拼命地挣扎。"}
 
-            return new_defender_hp
+            move_power = move_data.get('power', 0)
+            move_attr = move_data.get('attribute', '普通')
+
+            turn_log.append(f"「{attacker['pet_name']}」使用了「{chosen_move_name}」！")
+
+            # --- 3. 计算伤害 (如果 power > 0) ---
+            if move_power > 0:
+                # --- 3a. 计算攻防 (计入状态和持有物) ---
+                satiety_mod = 0.5 + (attacker['satiety'] / 100) * 0.7
+                if attacker['satiety'] < 20:
+                    turn_log.append(f"「{attacker['pet_name']}」饿得有气无力...")
+
+                eff_attack = attacker['attack'] * satiety_mod
+                eff_defense = defender['defense'] * (0.5 + (defender['satiety'] / 100) * 0.7)
+
+                # 应用持有物
+                if attacker.get('held_item') == "力量头带": eff_attack *= 1.1
+                if defender.get('held_item') == "坚硬外壳": eff_defense *= 1.1
+
+                # --- 3b. 计算暴击 ---
+                crit_chance = 0.05 + (attacker['mood'] / 100) * 0.20
+                is_crit = random.random() < crit_chance
+                crit_multiplier = 1.3 + (attacker['mood'] / 100) * 0.4
+
+                # --- 3c. 计算克制和伤害 ---
+                attr_multiplier = self._get_attribute_multiplier(move_attr, defender_pet_attr)
+                level_diff_mod = 1 + (attacker['level'] - defender['level']) * 0.02
+
+                base_dmg = max(1, (eff_attack * 0.7 + move_power * 1.5) - (eff_defense * 0.6))
+
+                final_dmg = int(base_dmg * attr_multiplier * level_diff_mod)
+                if is_crit:
+                    final_dmg = int(final_dmg * crit_multiplier)
+
+                defender_hp -= final_dmg
+
+                if is_crit: turn_log.append("💥 会心一击！")
+                if attr_multiplier > 1.2:
+                    turn_log.append("效果拔群！")
+                elif attr_multiplier < 1.0:
+                    turn_log.append("效果不太理想…")
+                turn_log.append(f"对「{defender['pet_name']}」造成了 {final_dmg} 点伤害！(剩余HP: {max(0, defender_hp)})")
+
+            # --- 4. 结算技能效果 (无论伤害如何) ---
+            if move_data.get('effect') and defender.get('status_condition') is None: # 无法覆盖已有的状态
+                effect_type = move_data['effect'].get('type')
+                effect_chance = move_data['effect'].get('chance', 1.0)
+
+                if random.random() < effect_chance:
+                    # 检查属性免疫 (例如 电系 不会 麻痹)
+                    immune = False
+                    if effect_type == 'POISON' and defender_pet_attr == '毒': immune = True
+                    if effect_type == 'PARALYSIS' and defender_pet_attr == '电': immune = True
+
+                    if not immune:
+                        new_defender_status = effect_type
+                        defender['status_condition'] = new_defender_status # 更新字典中的状态
+                        status_name = STAT_MAP.get(new_defender_status, "异常")
+                        turn_log.append(f"「{defender['pet_name']}」陷入了「{status_name}」状态！")
+                    else:
+                        turn_log.append(f"「{defender['pet_name']}」免疫该状态！")
+
+            return defender_hp, new_defender_status, turn_log
+
 
         turn = 0
         while p1_hp > 0 and p2_hp > 0:
             turn += 1
             log.append(f"\n--- 第 {turn} 回合 ---")
 
+            # --- 回合开始：结算P1中毒 ---
+            if pet1.get('status_condition') == 'POISON':
+                poison_dmg = max(1, int(pet1['level'] * 0.5))
+                p1_hp -= poison_dmg
+                log.append(f"「{p1_name}」受到了 {poison_dmg} 点中毒伤害。")
+                if p1_hp <= 0: break
+
+            # --- P1 行动 ---
             turn_log_1 = []
-            p2_hp = calculate_turn(pet1, pet2, p2_hp, turn_log_1)
+            p2_hp, pet2['status_condition'], turn_log_1 = calculate_turn(
+                pet1, pet2, p2_hp, p1_moves, p2_pet_attr, turn_log_1
+            )
             log.extend(turn_log_1)
             if p2_hp <= 0: break
 
+            # --- 回合开始：结算P2中毒 ---
+            if pet2.get('status_condition') == 'POISON':
+                poison_dmg = max(1, int(pet2['level'] * 0.5))
+                p2_hp -= poison_dmg
+                log.append(f"「{p2_name}」受到了 {poison_dmg} 点中毒伤害。")
+                if p2_hp <= 0: break
+
+            # --- P2 行动 ---
             turn_log_2 = []
-            p1_hp = calculate_turn(pet2, pet1, p1_hp, turn_log_2)
+            p1_hp, pet1['status_condition'], turn_log_2 = calculate_turn(
+                pet2, pet1, p1_hp, p2_moves, p1_pet_attr, turn_log_2
+            )
             log.extend(turn_log_2)
+            if p1_hp <= 0: break
 
         winner_name = p1_name if p1_hp > 0 else p2_name
         log.append(f"\n战斗结束！胜利者是「{winner_name}」！")
-        return log, winner_name
 
-    def _extract_json_from_text(self, text: str) -> str | None:
-        """从文本中稳健地提取JSON对象。"""
-        match = re.search(r"```json\s*([\s\S]*?)\s*```", text)
-        if match:
-            return match.group(1).strip()
-        try:
-            start_index = text.find('{')
-            if start_index == -1: return None
-            brace_level = 0
-            for i, char in enumerate(text[start_index:]):
-                if char == '{':
-                    brace_level += 1
-                elif char == '}':
-                    brace_level -= 1
-                if brace_level == 0: return text[start_index: start_index + i + 1]
-            return None
-        except Exception:
-            return None
+        # --- 战斗后结算状态 ---
+        with sqlite3.connect(self.db_path) as conn:
+            # 睡眠状态在战斗结束后自动解除
+            p1_final_status = None if pet1.get('status_condition') == 'SLEEP' else pet1.get('status_condition')
+            p2_final_status = None if pet2.get('status_condition') == 'SLEEP' else pet2.get('status_condition')
+
+            conn.execute("UPDATE pets SET status_condition = ? WHERE user_id = ? AND group_id = ?",
+                         (p1_final_status, int(pet1_orig['user_id']), int(pet1_orig['group_id'])))
+            conn.execute("UPDATE pets SET status_condition = ? WHERE user_id = ? AND group_id = ?",
+                         (p2_final_status, int(pet2_orig['user_id']), int(pet2_orig['group_id'])))
+            conn.commit()
+
+        return log, winner_name
+    # --- 战斗核心结束 ---
+
 
     @filter.command("领养宠物")
     async def adopt_pet(self, event: AstrMessageEvent, pet_name: str | None = None):
-        """领养一只随机的初始宠物"""
+        """领养一只随机的初始宠物（已更新为使用技能系统）。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id:
             yield event.plain_result("该功能仅限群聊使用。")
@@ -455,18 +647,29 @@ class PetPlugin(Star):
             yield event.plain_result("你在这个群里已经有一只宠物啦！发送 /我的宠物 查看。")
             return
 
-        type_name = random.choice(["水灵灵", "火小犬", "草叶猫"])
+        available_pets = list(self.pets_data.keys())
+        if not available_pets:
+            yield event.plain_result("错误：宠物配置文件为空，请联系管理员。")
+            return
+
+        type_name = random.choice(available_pets)
         if not pet_name: pet_name = type_name
 
-        pet_info = PET_TYPES[type_name]
-        stats = pet_info['initial_stats']
+        pet_info = self.pets_data[type_name]
+        stats = pet_info['base_stats']
         now_iso = datetime.now().isoformat()
+
+        # --- 分配初始技能 ---
+        learnset = pet_info.get('learnset', {})
+        default_moves = learnset.get('1', ["撞击"]) # 默认1级技能
+        moves = (default_moves + [None] * 4)[:4] # 填充技能栏
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                """INSERT INTO pets (user_id, group_id, pet_name, pet_type, attack, defense, last_updated_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (int(user_id), int(group_id), pet_name, type_name, stats['attack'], stats['defense'], now_iso)
+                """INSERT INTO pets (user_id, group_id, pet_name, pet_type, attack, defense, last_updated_time, move1, move2, move3, move4)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (int(user_id), int(group_id), pet_name, type_name, stats['attack'], stats['defense'], now_iso,
+                 moves[0], moves[1], moves[2], moves[3])
             )
             conn.commit()
         logger.info(f"新宠物领养: 群 {group_id} 用户 {user_id} 领养了 {type_name} - {pet_name}")
@@ -556,12 +759,28 @@ class PetPlugin(Star):
 
         elif event_type == 'pve':
             npc_level = max(1, pet['level'] + random.randint(-1, 1))
-            npc_type_name = random.choice(list(PET_TYPES.keys()))
-            npc_stats = PET_TYPES[npc_type_name]['initial_stats']
+            npc_type_name = random.choice(list(self.pets_data.keys()))
+            npc_pet_info = self.pets_data[npc_type_name]
+            npc_stats = npc_pet_info['base_stats']
+
+            # 为NPC分配技能
+            npc_learnset = npc_pet_info.get('learnset', {})
+            npc_available_moves = []
+            for lvl_str, moves in npc_learnset.items():
+                if int(lvl_str) <= npc_level:
+                    npc_available_moves.extend(moves)
+
+            if not npc_available_moves: npc_available_moves = ["撞击"]
+            chosen_moves = (random.sample(npc_available_moves, min(len(npc_available_moves), 4)) + [None] * 4)[:4]
+
             npc_pet = {
+                "user_id": "0", "group_id": "0", # 假ID
                 "pet_name": f"野生的{npc_type_name}", "pet_type": npc_type_name,
                 "level": npc_level, "attack": npc_stats['attack'] + npc_level,
-                "defense": npc_stats['defense'] + npc_level, "satiety": 100, "mood": 100
+                "defense": npc_stats['defense'] + npc_level, "satiety": 100, "mood": 100,
+                "move1": chosen_moves[0], "move2": chosen_moves[1],
+                "move3": chosen_moves[2], "move4": chosen_moves[3],
+                "status_condition": None, "held_item": None # 野生宠物默认无状态
             }
 
             battle_log, winner_name = self._run_battle(pet, npc_pet)
@@ -693,8 +912,10 @@ class PetPlugin(Star):
             yield event.plain_result("你还没有宠物哦。")
             return
 
-        pet_type_info = PET_TYPES[pet['pet_type']]
-        current_evo_info = pet_type_info['evolutions'][pet['evolution_stage']]
+        pet_type_info = self.pets_data.get(pet['pet_type'])
+        if not pet_type_info: return
+
+        current_evo_info = pet_type_info['evolutions'][str(pet['evolution_stage'])]
 
         evolve_level = current_evo_info['evolve_level']
         if not evolve_level:
@@ -706,7 +927,11 @@ class PetPlugin(Star):
             return
 
         next_evo_stage = pet['evolution_stage'] + 1
-        next_evo_info = pet_type_info['evolutions'][next_evo_stage]
+        next_evo_info = pet_type_info['evolutions'].get(str(next_evo_stage))
+        if not next_evo_info:
+             yield event.plain_result(f"「{pet['pet_name']}」已是最终形态，无法再进化。")
+             return
+
         new_attack = pet['attack'] + random.randint(8, 15)
         new_defense = pet['defense'] + random.randint(8, 15)
 
@@ -719,6 +944,136 @@ class PetPlugin(Star):
         logger.info(f"宠物进化成功: {pet['pet_name']} -> {next_evo_info['name']}")
         yield event.plain_result(
             f"光芒四射！你的「{pet['pet_name']}」成功进化为了「{next_evo_info['name']}」！各项属性都得到了巨幅提升！")
+
+    # --- 技能管理命令 ---
+    @filter.command("宠物技能")
+    async def pet_moves(self, event: AstrMessageEvent):
+        """查看宠物的技能学习情况。"""
+        user_id, group_id = event.get_sender_id(), event.get_group_id()
+        if not group_id: return
+        pet = self._get_pet(user_id, group_id)
+        if not pet:
+            yield event.plain_result("你还没有宠物哦。")
+            return
+
+        pet_config = self.pets_data.get(pet['pet_type'])
+        if not pet_config:
+            yield event.plain_result("错误：找不到宠物配置。")
+            return
+
+        learnset = pet_config.get('learnset', {})
+
+        reply = f"--- 「{pet['pet_name']}」的技能 ---\n"
+        reply += "【当前技能】\n"
+        current_moves = [pet.get('move1'), pet.get('move2'), pet.get('move3'), pet.get('move4')]
+        for i, move in enumerate(current_moves):
+            if move:
+                move_data = self.moves_data.get(move, {})
+                power = move_data.get('power', '?')
+                attr = move_data.get('attribute', '?')
+                reply += f"[{i+1}] {move} (威力:{power} {attr}系)\n"
+            else:
+                reply += f"[{i+1}] -- 空 --\n"
+
+        reply += "\n【可学技能】(按等级)\n"
+        available_moves = []
+        for lvl_str, moves in learnset.items():
+            if int(lvl_str) <= pet['level']:
+                available_moves.extend(moves)
+
+        if not available_moves:
+            reply += "暂无可学习的技能。\n"
+        else:
+            # 去重并保持顺序
+            seen = set()
+            unique_moves = [m for m in available_moves if not (m in seen or seen.add(m))]
+            reply += "、".join(unique_moves)
+            reply += "\n\n使用 `/学习技能 [栏位] [技能名]` 来替换技能。"
+
+        yield event.plain_result(reply)
+
+    @filter.command("学习技能")
+    async def learn_move(self, event: AstrMessageEvent, slot: int, move_name: str):
+        """让宠物在指定栏位学习一个新技能。"""
+        user_id, group_id = event.get_sender_id(), event.get_group_id()
+        if not group_id: return
+
+        pet = self._get_pet(user_id, group_id)
+        if not pet:
+            yield event.plain_result("你还没有宠物。")
+            return
+
+        if not 1 <= slot <= 4:
+            yield event.plain_result("技能栏位必须是 1 到 4 之间。")
+            return
+
+        pet_config = self.pets_data.get(pet['pet_type'])
+        if not pet_config:
+            yield event.plain_result("错误：找不到宠物配置。")
+            return
+
+        # 检查是否在可学列表里
+        learnset = pet_config.get('learnset', {})
+        can_learn = False
+        for lvl_str, moves in learnset.items():
+            if int(lvl_str) <= pet['level'] and move_name in moves:
+                can_learn = True
+                break
+
+        # 检查是否通过TM（技能光盘）学习
+        is_tm = False
+        if not can_learn:
+            item_name = f"技能光盘-{move_name}"
+            if item_name in SHOP_ITEMS and SHOP_ITEMS[item_name]['type'] == 'tm':
+                # 检查背包
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT quantity FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                        (int(user_id), int(group_id), item_name)
+                    )
+                    item_row = cursor.fetchone()
+                    if item_row and item_row[0] > 0:
+                        is_tm = True
+                    else:
+                        yield event.plain_result(f"你的宠物等级不足，且背包中没有「{item_name}」。")
+                        return
+            else:
+                 yield event.plain_result(f"你的宠物等级不足，无法学习「{move_name}」。")
+                 return
+
+        if move_name not in self.moves_data:
+             yield event.plain_result(f"技能库中不存在名为「{move_name}」的技能。")
+             return
+
+        move_col = f"move{slot}"
+        old_move = pet.get(move_col) or "空栏位"
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                f"UPDATE pets SET {move_col} = ? WHERE user_id = ? AND group_id = ?",
+                (move_name, int(user_id), int(group_id))
+            )
+
+            # 如果是TM，则消耗掉
+            if is_tm:
+                item_name = f"技能光盘-{move_name}"
+                conn.execute(
+                    "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                    (int(user_id), int(group_id), item_name)
+                )
+                conn.execute(
+                    "DELETE FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ? AND quantity <= 0",
+                    (int(user_id), int(group_id), item_name))
+
+            conn.commit()
+
+        learn_msg = f"学习成功！「{pet['pet_name']}」忘记了「{old_move}」，学会了「{move_name}」！"
+        if is_tm:
+            learn_msg += f"\n（消耗了 1 个「技能光盘-{move_name}」）"
+
+        yield event.plain_result(learn_msg)
+
 
     @filter.command("宠物商店")
     async def shop(self, event: AstrMessageEvent):
@@ -795,21 +1150,26 @@ class PetPlugin(Star):
 
         yield event.plain_result(f"购买成功！你花费 ${total_cost} 购买了 {quantity} 个「{item_name}」。")
 
-    @filter.command("投喂")
-    async def feed_pet_item(self, event: AstrMessageEvent, item_name: str):
-        """从背包中使用食物投喂宠物。"""
+    # --- v1.5 /投喂 -> /使用 ---
+    @filter.command("使用")
+    async def use_item(self, event: AstrMessageEvent, item_name: str):
+        """从背包中使用物品（食物、药品等）。"""
         user_id, group_id = event.get_sender_id(), event.get_group_id()
         if not group_id: return
 
         pet = self._get_pet(user_id, group_id)
         if not pet:
-            yield event.plain_result("你还没有宠物，不能进行投喂哦。")
+            yield event.plain_result("你还没有宠物，不能使用物品哦。")
             return
 
-        if item_name not in SHOP_ITEMS or SHOP_ITEMS[item_name].get('type') != 'food':
-            yield event.plain_result(f"「{item_name}」不是可以投喂的食物。")
+        if item_name not in SHOP_ITEMS:
+            yield event.plain_result(f"「{item_name}」不是一个可用的物品。")
             return
 
+        item_info = SHOP_ITEMS[item_name]
+        item_type = item_info.get('type')
+
+        # --- 检查背包是否有此物品 ---
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -822,28 +1182,121 @@ class PetPlugin(Star):
                 yield event.plain_result(f"你的背包里没有「{item_name}」。")
                 return
 
+            # --- 消耗物品 ---
             cursor.execute(
                 "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
                 (int(user_id), int(group_id), item_name)
             )
-
-            item_info = SHOP_ITEMS[item_name]
-            satiety_gain = item_info.get('satiety', 0)
-            mood_gain = item_info.get('mood', 0)
-
             cursor.execute(
-                "UPDATE pets SET satiety = MIN(100, satiety + ?), mood = MIN(100, mood + ?) WHERE user_id = ? AND group_id = ?",
-                (satiety_gain, mood_gain, int(user_id), int(group_id))
+                "DELETE FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ? AND quantity <= 0",
+                (int(user_id), int(group_id), item_name))
+
+            reply_msg = ""
+
+            # --- 根据物品类型处理效果 ---
+            if item_type == 'food':
+                satiety_gain = item_info.get('satiety', 0)
+                mood_gain = item_info.get('mood', 0)
+                cursor.execute(
+                    "UPDATE pets SET satiety = MIN(100, satiety + ?), mood = MIN(100, mood + ?) WHERE user_id = ? AND group_id = ?",
+                    (satiety_gain, mood_gain, int(user_id), int(group_id))
+                )
+                s_name = STAT_MAP.get('satiety')
+                m_name = STAT_MAP.get('mood')
+                reply_msg = f"你给「{pet['pet_name']}」投喂了「{item_name}」，它的{s_name}增加了 {satiety_gain}，{m_name}增加了 {mood_gain}！"
+
+            elif item_type == 'status_heal':
+                status_cured = item_info.get('cures')
+                current_status = pet.get('status_condition')
+                if current_status == status_cured:
+                    cursor.execute(
+                        "UPDATE pets SET status_condition = NULL WHERE user_id = ? AND group_id = ?",
+                        (int(user_id), int(group_id))
+                    )
+                    status_name = STAT_MAP.get(status_cured, "异常")
+                    reply_msg = f"你对「{pet['pet_name']}」使用了「{item_name}」，它的「{status_name}」状态被治愈了！"
+                else:
+                    reply_msg = f"「{item_name}」对你的宠物没有效果。"
+                    # 把物品还回去
+                    cursor.execute("UPDATE inventory SET quantity = quantity + 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                                   (int(user_id), int(group_id), item_name))
+
+            elif item_type == 'held_item':
+                reply_msg = f"「{item_name}」是持有物，请使用 `/装备 {item_name}` 来给宠物携带。"
+                # 把物品还回去
+                cursor.execute("UPDATE inventory SET quantity = quantity + 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                                (int(user_id), int(group_id), item_name))
+
+            elif item_type == 'tm':
+                reply_msg = f"「{item_name}」是技能光盘，请使用 `/学习技能 [栏位] {item_info.get('move_name')}` 来学习。"
+                # 把物品还回去
+                cursor.execute("UPDATE inventory SET quantity = quantity + 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                                (int(user_id), int(group_id), item_name))
+
+            else:
+                reply_msg = f"你使用了「{item_name}」，但似乎什么也没发生..."
+
+            conn.commit()
+            yield event.plain_result(reply_msg)
+
+    # --- v1.5 新增：装备命令 ---
+    @filter.command("装备")
+    async def equip_item(self, event: AstrMessageEvent, item_name: str):
+        """从背包中装备一个持有物。"""
+        user_id, group_id = event.get_sender_id(), event.get_group_id()
+        if not group_id: return
+
+        pet = self._get_pet(user_id, group_id)
+        if not pet:
+            yield event.plain_result("你还没有宠物。")
+            return
+
+        if item_name not in SHOP_ITEMS or SHOP_ITEMS[item_name].get('type') != 'held_item':
+            yield event.plain_result(f"「{item_name}」不是一个可以装备的持有物。")
+            return
+
+        # 检查背包
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT quantity FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                (int(user_id), int(group_id), item_name)
+            )
+            item_row = cursor.fetchone()
+
+            if not item_row or item_row[0] <= 0:
+                yield event.plain_result(f"你的背包里没有「{item_name}」。")
+                return
+
+            # --- 卸下旧装备 (如果有) ---
+            old_item = pet.get('held_item')
+            if old_item:
+                cursor.execute("""
+                    INSERT INTO inventory (user_id, group_id, item_name, quantity) VALUES (?, ?, ?, 1)
+                    ON CONFLICT(user_id, group_id, item_name) 
+                    DO UPDATE SET quantity = quantity + 1
+                """, (int(user_id), int(group_id), old_item))
+
+            # --- 消耗新装备 (从背包) ---
+            cursor.execute(
+                "UPDATE inventory SET quantity = quantity - 1 WHERE user_id = ? AND group_id = ? AND item_name = ?",
+                (int(user_id), int(group_id), item_name)
             )
             cursor.execute(
                 "DELETE FROM inventory WHERE user_id = ? AND group_id = ? AND item_name = ? AND quantity <= 0",
                 (int(user_id), int(group_id), item_name))
+
+            # --- 装备到宠物 ---
+            cursor.execute(
+                "UPDATE pets SET held_item = ? WHERE user_id = ? AND group_id = ?",
+                (item_name, int(user_id), int(group_id))
+            )
             conn.commit()
 
-        satiety_chinese = STAT_MAP.get('satiety', '饱食度')
-        mood_chinese = STAT_MAP.get('mood', '心情值')
-        yield event.plain_result(
-            f"你给「{pet['pet_name']}」投喂了「{item_name}」，它的{satiety_chinese}增加了 {satiety_gain}，{mood_chinese}增加了 {mood_gain}！")
+        reply = f"装备成功！「{pet['pet_name']}」现在携带着「{item_name}」。"
+        if old_item:
+            reply += f"\n（已将「{old_item}」放回背包）"
+        yield event.plain_result(reply)
 
     @filter.command("宠物签到")
     async def daily_signin(self, event: AstrMessageEvent):
@@ -932,17 +1385,22 @@ class PetPlugin(Star):
     @filter.command("宠物菜单")
     async def pet_menu(self, event: AstrMessageEvent):
         """显示所有可用的宠物插件命令。"""
-        menu_text = """--- 🐾 宠物插件帮助菜单 v1.3 🐾 ---
+        menu_text = """--- 🐾 宠物插件帮助菜单 v1.5 🐾 ---
 【核心功能】
 /领养宠物 [名字] - 领养一只新宠物。
-/我的宠物 - 查看宠物详细状态图。
+/我的宠物 - 查看宠物详细状态图(含状态/持有物)。
 /宠物改名 [新名] - 给你的宠物换个名字。
 /宠物进化 - 当宠物达到等级时进化。
 
+【技能与装备】
+/宠物技能 - 查看当前技能和可学技能。
+/学习技能 [栏位] [技能名] - 学习新技能。
+/装备 [物品名] - 让宠物携带一个持有物。
+
 【日常互动】
 /宠物签到 - 每天领取金钱奖励。
-/散步 - 带宠物散步，触发随机奇遇或战斗。
-/投喂 [物品] - 从背包使用食物喂养宠物。
+/散步 - 带宠物散步，触发奇遇或战斗。
+/使用 [物品名] - 使用食物或药品。 (原/投喂)
 
 【商店与物品】
 /宠物商店 - 查看可购买的商品。
@@ -966,4 +1424,4 @@ class PetPlugin(Star):
 
     async def terminate(self):
         """插件卸载/停用时调用。"""
-        logger.info("群宠物插件(astrbot_plugin_pet)已卸载。")
+        logger.info("简易群宠物游戏插件(astrbot_plugin_pet)已卸载。")
