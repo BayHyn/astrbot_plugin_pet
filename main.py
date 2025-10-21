@@ -219,10 +219,15 @@ class PetPlugin(Star):
         try:
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
         except sqlite3.OperationalError as e:
-            if f"duplicate column name: {column_name}" not in str(e):
+            # --- 修正：检查错误信息 *是否包含* "duplicate column name" ---
+            if f"duplicate column name: {column_name}" in str(e):
+                # 如果是重复列名的错误，则记录日志并忽略
                 logger.warning(f"尝试添加已存在的列: {column_name} (已忽略)")
             else:
+                # 如果是其他 OperationalError，则记录并重新引发
+                logger.error(f"数据库 _add_column 时发生意外错误: {e}")
                 raise
+            # --- 修正结束 ---
 
     def _load_config(self, config_path: Path, default_data: dict | list) -> dict | list:
         """加载指定的JSON配置文件，如果不存在则创建。"""
