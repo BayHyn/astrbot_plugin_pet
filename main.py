@@ -140,7 +140,7 @@ STAT_MAP = {
     "简易群宠物游戏",
     "DITF16",
     "一个简单的的群内宠物养成插件",
-    "1.5",
+    "1.6",
     "https://github.com/DITF16/astrbot_plugin_pet"
 )
 class PetPlugin(Star):
@@ -1060,6 +1060,13 @@ class PetPlugin(Star):
              yield event.plain_result(f"技能库中不存在名为「{move_name}」的技能。")
              return
 
+        # --- [MODIFIED] 检查技能是否已装备 ---
+        current_moves = [pet.get('move1'), pet.get('move2'), pet.get('move3'), pet.get('move4')]
+        if move_name in current_moves:
+            yield event.plain_result(f"你的宠物已经学会「{move_name}」了，不能重复学习同一个技能。")
+            return
+        # --- 结束 ---
+
         move_col = f"move{slot}"
         old_move = pet.get(move_col) or "空栏位"
 
@@ -1087,6 +1094,65 @@ class PetPlugin(Star):
             learn_msg += f"\n（消耗了 1 个「技能光盘-{move_name}」）"
 
         yield event.plain_result(learn_msg)
+
+    # --- [NEW] 新增管理员修复功能 ---
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("修复宠物技能")
+    async def admin_fix_skills(self, event: AiocqhttpMessageEvent):
+        """(管理员) 检查并修复本群所有宠物的重复技能。"""
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("该功能仅限群聊使用。")
+            return
+
+        reset_pets_info = [] # 存储被重置的宠物信息
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM pets WHERE group_id = ?", (int(group_id),))
+                all_pets = cursor.fetchall()
+
+                if not all_pets:
+                    yield event.plain_result("本群还没有领养任何宠物。")
+                    return
+
+                for pet in all_pets:
+                    moves = [pet['move1'], pet['move2'], pet['move3'], pet['move4']]
+                    filled_moves = [m for m in moves if m] # 过滤掉 None
+
+                    # 检查是否有重复技能
+                    if len(filled_moves) > len(set(filled_moves)):
+                        # 发现重复，执行重置
+                        pet_config = self.pets_data.get(pet['pet_type'])
+                        if not pet_config:
+                            logger.error(f"修复技能失败：群{group_id} 宠物{pet['pet_name']} 找不到 {pet['pet_type']} 的配置")
+                            continue
+
+                        learnset = pet_config.get('learnset', {})
+                        default_moves = learnset.get('1', ["撞击"])
+                        new_moves = (default_moves + [None] * 4)[:4]
+
+                        conn.execute(
+                            """UPDATE pets SET move1 = ?, move2 = ?, move3 = ?, move4 = ?
+                               WHERE user_id = ? AND group_id = ?""",
+                            (new_moves[0], new_moves[1], new_moves[2], new_moves[3], pet['user_id'], int(group_id))
+                        )
+                        reset_pets_info.append({'name': pet['pet_name'], 'user_id': pet['user_id']})
+
+            if not reset_pets_info:
+                yield event.plain_result("✅ 检查完毕。本群所有宠物技能均无异常。")
+            else:
+                names = [p['name'] for p in reset_pets_info]
+                user_ids = [p['user_id'] for p in reset_pets_info]
+                logger.info(f"管理员 {event.get_sender_id()} 修复了群 {group_id} 的宠物技能，被重置的用户: {user_ids}")
+                yield event.plain_result(f"🛠️ 技能修复完毕！以下宠物的技能（因重复）已被重置为1级默认：\n{', '.join(names)}")
+
+        except Exception as e:
+            logger.error(f"执行 /修复宠物技能 时发生错误: {e}")
+            yield event.plain_result(f"执行修复时发生内部错误，请检查日志: {e}")
+
 
 
     @filter.command("宠物商店")
@@ -1450,6 +1516,7 @@ class PetPlugin(Star):
 /宠物排行 - 查看本群最强的宠物们。
 
 【其他命令】
+/修复宠物技能 - (管理员) 修复本群所有宠物的重复技能。
 /丢弃宠物 - (危险) 与你的宠物告别，慎用！
 """
         yield event.plain_result(menu_text)
